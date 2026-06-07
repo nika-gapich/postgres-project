@@ -1,0 +1,68 @@
+#Оркестрация PostgreSQL (Docker Infrastructure & Security)
+
+services:
+  postgres_db:
+    #1.1. База на базе Alpine Linux - минимальный и безопасный образ
+    image: postgres:16-alpine
+    container_name: project_postgres_db
+    restart: unless-stopped
+
+    #1.1. Конфигурация сетевых параметров и изоляции
+    #Запрещено использовать сеть default, создаем свою изолированную
+    networks:
+      - backend-net
+
+    #1.1. Именованный том (named volume) для PGDATA
+    #Данные базы будут храниться здесь и не пропадут при перезапуске
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+    #Передача безопасных настроек из файла .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+      #1.2. Полный отказ от пароля в открытом виде
+      #Мы указываем Docker'у читать пароль из файла-секрета внутри контейнера
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_postgres_password
+
+    #Подключение секрета к контейнеру
+    secrets:
+      - db_postgres_password
+
+    #1.3. Ограничение ресурсов контейнера
+    #Используем точные термины из задания для защиты от OOM killer
+    mem_limit: 512m         #Лимит RAM 512 мегабайта
+    memswap_limit: 512m     #Запрещаем использовать файл подкачки
+    cpu_period: 100000      #Базовый период процессорного времени
+    cpu_quota: 100000       #Квота (100000/100000 = 1 ядро CPU)
+
+    #1.4. Health Check настройка
+    #Проверка работоспособности через нативную утилиту pg_isready
+    healthcheck:
+      #Docker не подставил переменную на этапе запуска, а оставил её для bash внутри контейнера
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 15s    #Интервал проверки
+      timeout: 5s      #Таймаут ожидания ответа
+      retries: 5       #Количество попыток перед статусом 'unhealthy'
+      start_period: 30s #Время на первичный запуск и инициализацию БД
+
+
+#Сетевые настройки (Изолированные сети)
+
+networks:
+  backend-net:
+    driver: bridge
+
+
+#Том для данных (Persistent data)
+
+volumes:
+  pg_data:
+    driver: local
+
+
+#Секреты (Docker Secrets)
+
+secrets:
+  db_postgres_password:
+    file: ./secrets/db_password.txt
