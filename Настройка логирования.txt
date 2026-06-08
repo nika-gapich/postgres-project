@@ -1,0 +1,163 @@
+1. Настройка log_min_duration_statement для медленных запросов
+Параметр log_min_duration_statement записывает в лог все запросы, которые выполняются дольше указанного порога (в миллисекундах). Это основной инструмент поиска медленных запросов без просадки производительности из‑за логирования каждого запроса.
+
+Где менять
+В файле postgresql.conf (путь зависит от ОС и способа установки; в Docker это либо монтируемый конфиг, либо ALTER SYSTEM).
+
+Примеры значений
+log_min_duration_statement = 0 — логировать все запросы (не рекомендуется для продакшена: очень много логов, падение производительности).
+
+log_min_duration_statement = 1000 — логировать запросы дольше 1 секунды (хороший старт для продакшена).
+
+log_min_duration_statement = 200 — для нагруженных систем, где «медленный» — это уже 200 мс.
+
+log_min_duration_statement = -1 — выключить логирование длительности (по умолчанию).
+
+Как применить
+Вариант A (через ALTER SYSTEM, без перезапуска службы):
+
+sql
+ALTER SYSTEM SET log_min_duration_statement = 1000;
+SELECT pg_reload_conf();
+Вариант B (вручную в postgresql.conf):
+
+Откройте postgresql.conf.
+
+Найдите или добавьте строку:
+
+conf
+log_min_duration_statement = 1000
+Перезагрузите конфигурацию:
+
+bash
+pg_ctl reload -D /path/to/data
+# или в Docker: docker restart <container> либо pg_reload_conf()
+Важно: Логируются не только SELECT, но и INSERT/UPDATE/DELETE. Это полезно для поиска «тяжёлых» операций записи.
+
+2. Включение детального логирования ошибок
+Чтобы в логах было достаточно информации для диагностики, нужно правильно настроить несколько параметров.
+
+Ключевые параметры
+conf
+log_error_verbosity = default      # или 'verbose' для ещё более подробных сообщений (но больше логов)
+log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+log_statement = 'none'             # не включайте 'all' в продакшене: сильно бьёт по производительности и безопасности
+log_duration = off                 # включать только при отладке
+Что даёт каждый параметр
+log_error_verbosity: уровень детализации ошибок. default — достаточно для большинства случаев; verbose — добавляет внутренние детали (CTE, планы и т. п.), полезно при расследовании.
+
+log_line_prefix: добавляет в каждую строку лога время, PID, номер строки, пользователя, БД, приложение, IP клиента. Это критично для трассировки проблем.
+
+log_statement: логирует текст запроса. В продакшене лучше держать none и полагаться на log_min_duration_statement. Если нужно логировать всё — только в тестовой среде.
+
+log_duration: длительность каждого запроса (даже быстрых). Сильно увеличивает объём логов; используйте точечно при профилировании.
+
+Пример префикса
+conf
+log_line_prefix = '%t [%p]: user=%u,db=%d,client=%h,app=%a '
+Расшифровка:
+
+%t — время (timestamp)
+
+%p — PID процесса
+
+%u — имя пользователя
+
+%d — имя базы данных
+
+%h — IP клиента
+
+%a — имя приложения (из application_name)
+
+Применение
+Через ALTER SYSTEM:
+
+sql
+ALTER SYSTEM SET log_error_verbosity = 'default';
+ALTER SYSTEM SET log_line_prefix = '%t [%p]: user=%u,db=%d,client=%h,app=%a ';
+SELECT pg_reload_conf();
+3. Настройка ротации логов PostgreSQL
+PostgreSQL может писать логи в файлы или в syslog. Для управляемой ротации лучше использовать logging collector и внешнюю ротацию (logrotate в Linux) либо нативную ротацию PostgreSQL.
+
+Вариант A: logging collector + logrotate (рекомендуется для Linux)
+В postgresql.conf:
+
+conf
+logging_collector = on
+log_directory = 'log'                # папка относительно data_directory
+log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+log_rotation_age = 1d                # ротировать каждые 24 часа
+log_rotation_size = 100MB            # или по размеру
+log_truncate_on_rotation = off       # сохранять старые логи
+Затем настройте logrotate (например, /etc/logrotate.d/postgresql):
+
+text
+/var/lib/postgresql/data/log/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 postgres postgres
+}
+(пути и пользователь зависят от вашей установки).
+
+Вариант B: встроенная ротация PostgreSQL
+Если не используете logging_collector, можно полагаться на log_rotation_age и log_rotation_size при выводе в файлы. Но logging_collector даёт более предсказуемое поведение.
+
+Для Docker
+В Docker логи обычно выводят в stdout/stderr, а ротацию делает сам Docker (через docker run --log-opt max-size=10m --log-opt max-file=3). В этом случае внутри PostgreSQL логирование в файлы можно отключить:
+
+conf
+logging_collector = off
+и использовать стандартный вывод.
+
+4. Оптимизированная и безопасная конфигурация PostgreSQL + управление доступом
+Ниже — сводная «безопасная и оптимизированная» конфигурация, которую можно положить в postgresql.conf и pg_hba.conf.
+
+postgresql.conf (фрагмент)
+conf
+# Логирование
+logging_collector = on
+log_directory = 'log'
+log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+log_rotation_age = 1d
+log_rotation_size = 100MB
+log_line_prefix = '%t [%p]: user=%u,db=%d,client=%h,app=%a '
+log_error_verbosity = default
+log_min_duration_statement = 1000
+log_statement = none
+
+# Производительность (базовые безопасные настройки)
+shared_buffers = 25% RAM (но не более 8–16 ГБ на типичных серверах)
+work_mem = 32MB
+maintenance_work_mem = 256MB
+effective_cache_size = 75% RAM
+
+# Безопасность
+max_connections = 100              # уменьшите до реального максимума
+password_encryption = scram-sha-256
+ssl = on                           # обязательно при доступе из сети
+pg_hba.conf (управление доступом)
+Пример безопасного pg_hba.conf (локально — доверие, сеть — только по паролю/SSL):
+
+text
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+local   all             all                                     trust          # только для локальных unix-сокетов (если безопасно)
+host    all             all             127.0.0.1/32            scram-sha-256
+host    all             all             ::1/128                 scram-sha-256
+hostssl all             all             0.0.0.0/0               scram-sha-256  # только с SSL
+Используйте scram-sha-256 вместо md5.
+
+Ограничьте доступ по IP (вместо 0.0.0.0/0 лучше указать конкретные подсети).
+
+Для Docker/Kubernetes лучше не открывать порт наружу, а использовать network policies и внутренние сети.
+
+У
+sql
+CREATE ROLE app_user WITH LOGIN PASSWORD 'strong_password' CONNECTION LIMIT 20;
+GRANT CONNECT ON DATABASE mydb TO app_user;
+GRANT USAGE ON SCHEMA public TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
+

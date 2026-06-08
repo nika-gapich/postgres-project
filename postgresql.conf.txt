@@ -1,0 +1,38 @@
+# ===== ПАМЯТЬ =====
+# 25% от RAM (при 8GB RAM → 2GB)
+shared_buffers = '2GB'
+
+# Память на сортировку/хеши на один запрос (умеренно)
+work_mem = '32MB'
+
+# Оценка кэша ОС (рекомендуется ~75% от RAM)
+effective_cache_size = '6GB'
+
+# Для VACUUM, CREATE INDEX, REINDEX
+maintenance_work_mem = '512MB'
+
+# Для фоновых процессов автоочистки
+autovacuum_work_mem = '256MB'
+
+# ===== ПЛАНИРОВЩИК =====
+# Стоимости дискового ввода/вывода (для HDD → seq_page_cost=1.0, random_page_cost=4.0)
+# Для SSD можно ниже:
+random_page_cost = 1.1
+seq_page_cost = 1.0
+effective_io_concurrency = 200
+
+# ===== ЗАПРОСЫ =====
+# Максимальное время выполнения (защита от долгих запросов)
+statement_timeout = '5min'
+lock_timeout = '30s'
+
+# ===== ПОДКЛЮЧЕНИЯ =====
+max_connections = 100
+superuser_reserved_connections = 3
+
+# ===== ОЧИСТКА / АВТОВАКУУМ =====
+autovacuum = on
+autovacuum_vacuum_scale_factor = 0.05
+autovacuum_analyze_scale_factor = 0.02
+autovacuum_vacuum_threshold = 1000
+autovacuum_naptime = '30s'
