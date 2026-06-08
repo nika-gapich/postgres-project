@@ -1,0 +1,293 @@
+Шаг 2.1: Создание скрипта полного бэкапа
+Что делаем: Создаем основной скрипт для создания полных бэкапов базы данных.
+cd /opt/pg-backup/scripts
+nano pg_backup.sh
+Вставляем код:
+#!/bin/bash
+################################################################################
+# Скрипт полного резервного копирования PostgreSQL
+################################################################################
+
+set -euo pipefail
+
+# ============================================
+# КОНФИГУРАЦИЯ
+# ============================================
+BACKUP_DIR="/backup/dumps/full"
+LOG_DIR="/opt/pg-backup/logs"
+LOG_FILE="$LOG_DIR/pg_backup.log"
+DATE=$(date +%Y%m%d_%H%M%S)
+DATE_HUMAN=$(date '+%Y-%m-%d %H:%M:%S')
+
+# Параметры подключения
+DB_HOST="localhost"
+DB_PORT="5432"
+DB_NAME="mydb"
+DB_USER="postgres"
+
+# Настройки
+RETENTION_DAYS=7
+COMPRESSION_LEVEL=6
+
+# ============================================
+# ФУНКЦИИ
+# ============================================
+
+log() {
+    local level="$1"
+    local message="$2"
+    echo "[$DATE_HUMAN] [$level] $message" | tee -a "$LOG_FILE"
+}
+
+check_disk_space() {
+    local required_mb="$1"
+    local available_mb=$(df -m "$BACKUP_DIR" | awk 'NR==2 {print $4}')
+    
+    if [ "$available_mb" -lt "$required_mb" ]; then
+        log "ERROR" "Недостаточно места. Требуется: ${required_mb}MB, доступно: ${available_mb}MB"
+        exit 1
+    fi
+    
+    log "INFO" "Доступно места: ${available_mb}MB"
+}
+
+# ============================================
+# ОСНОВНАЯ ЧАСТЬ
+# ============================================
+
+log "INFO" "========== НАЧАЛО BACKUP =========="
+log "INFO" "Database: $DB_NAME"
+log "INFO" "Host: $DB_HOST:$DB_PORT"
+
+# Создаем директорию бэкапа
+mkdir -p "$BACKUP_DIR"
+
+# Проверяем свободное место (минимум 1GB)
+check_disk_space 1024
+
+# Имя файла бэкапа
+BACKUP_FILE="$BACKUP_DIR/${DB_NAME}_${DATE}.sql"
+COMPRESSED_FILE="${BACKUP_FILE}.gz"
+
+# Экспортируем путь к .pgpass
+export PGPASSFILE="/opt/pg-backup/config/.pgpass"
+
+# ============================================
+# СОЗДАНИЕ БЭКАПА
+# ============================================
+log "INFO" "Начало создания бэкапа..."
+
+if pg_dump \
+    -h "$DB_HOST" \
+    -p "$DB_PORT" \
+    -U "$DB_USER" \
+    -d "$DB_NAME" \
+    --format=plain \
+    --clean \
+    --if-exists \
+    --create \
+    --verbose \
+    > "$BACKUP_FILE" 2>> "$LOG_FILE"; then
+    
+    log "INFO" "Бэкап создан: $BACKUP_FILE"
+    
+    # Размер до сжатия
+    SIZE_BEFORE=$(du -h "$BACKUP_FILE" | cut -f1)
+    log "INFO" "Размер до сжатия: $SIZE_BEFORE"
+    
+    # ============================================
+    # СЖАТИЕ
+    # ============================================
+    log "INFO" "Начало сжатия..."
+    
+    if gzip -$COMPRESSION_LEVEL -f "$BACKUP_FILE"; then
+        log "INFO" "Сжатие завершено: $COMPRESSED_FILE"
+        
+        SIZE_AFTER=$(du -h "$COMPRESSED_FILE" | cut -f1)
+        log "INFO" "Размер после сжатия: $SIZE_AFTER"
+        
+        # ============================================
+        # ПРОВЕРКА ЦЕЛОСТНОСТИ
+        # ============================================
+        log "INFO" "Проверка целостности..."
+        
+        if gzip -t "$COMPRESSED_FILE"; then
+            log "INFO" "Проверка целостности: УСПЕШНО"
+            
+            # ============================================
+            # БЭКАП ГЛОБАЛЬНЫХ ОБЪЕКТОВ
+            # ============================================
+            log "INFO" "Создание бэкапа глобальных объектов..."
+            
+            GLOBALS_FILE="$BACKUP_DIR/globals_${DATE}.sql"
+            
+            if pg_dumpall \
+                -h "$DB_HOST" \
+                -p "$DB_PORT" \
+                -U "$DB_USER" \
+                --globals-only \
+                > "$GLOBALS_FILE" 2>> "$LOG_FILE"; then
+                
+                gzip -f "$GLOBALS_FILE"
+                log "INFO" "Глобальные объекты сохранены: ${GLOBALS_FILE}.gz"
+            else
+                log "WARN" "Не удалось создать бэкап глобальных объектов"
+            fi
+            
+            # ============================================
+            # ФИНАЛЬНАЯ ИНФОРМАЦИЯ
+            # ============================================
+            FINAL_SIZE=$(du -h "$COMPRESSED_FILE" | cut -f1)
+            
+            log "INFO" "========== BACKUP ЗАВЕРШЕН =========="
+            log "INFO" "Файл: $COMPRESSED_FILE"
+            log "INFO" "Размер: $FINAL_SIZE"
+            log "INFO" "======================================="
+            
+            exit 0
+        else
+            log "ERROR" "Проверка целостности НЕ ПРОЙДЕНА"
+            exit 1
+        fi
+    else
+        log "ERROR" "Ошибка сжатия"
+        exit 1
+    fi
+else
+    log "ERROR" "Ошибка создания бэкапа"
+    exit 1
+fi
+
+# Сохраняем файл: Ctrl+O, Enter, Ctrl+X
+
+# Делаем исполняемым
+chmod +x /opt/pg-backup/scripts/pg_backup.sh
+
+# Проверяем синтаксис
+bash -n /opt/pg-backup/scripts/pg_backup.sh
+
+Шаг 2.2: Тестирование скрипта бэкапа
+Что делаем: Запускаем скрипт вручную и проверяем результат.
+
+# Запускаем скрипт бэкапа
+cd /opt/pg-backup/scripts
+./pg_backup.sh
+
+# Проверяем результат
+ls -lh /backup/dumps/full/
+
+# Смотрим логи
+tail -50 /opt/pg-backup/logs/pg_backup.log
+
+# Проверяем целостность последнего бэкапа
+LATEST_BACKUP=$(ls -t /backup/dumps/full/mydb_*.sql.gz | head -1)
+echo "Проверка файла: $LATEST_BACKUP"
+gzip -t "$LATEST_BACKUP" && echo "Целостность подтверждена" || echo "Ошибка целостности"
+Ожидаемый результат:
+Файл бэкапа создан в /backup/dumps/full/
+Файл сжат (расширение .sql.gz)
+Файл глобальных объектов создан
+В логах нет ошибок
+
+Шаг 2.3: Создание скрипта pg_basebackup
+Что делаем: Создаем скрипт для создания бинарных бэкапов (необходимы для PITR).
+cd /opt/pg-backup/scripts
+nano pg_basebackup.sh
+Вставляем код:
+#!/bin/bash
+################################################################################
+# Скрипт создания бинарного бэкапа через pg_basebackup
+# Необходим для Point-in-Time Recovery (PITR)
+################################################################################
+
+set -euo pipefail
+
+# ============================================
+# КОНФИГУРАЦИЯ
+# ============================================
+BACKUP_DIR="/backup/basebackup"
+LOG_FILE="/opt/pg-backup/logs/pg_basebackup.log"
+DATE=$(date +%Y%m%d_%H%M%S)
+DATE_HUMAN=$(date '+%Y-%m-%d %H:%M:%S')
+
+DB_HOST="localhost"
+DB_PORT="5432"
+DB_USER="postgres"
+
+# ============================================
+# ФУНКЦИИ
+# ============================================
+
+log() {
+    local level="$1"
+    local message="$2"
+    echo "[$DATE_HUMAN] [$level] $message" | tee -a "$LOG_FILE"
+}
+
+# ============================================
+# ОСНОВНАЯ ЧАСТЬ
+# ============================================
+
+log "INFO" "========== НАЧАЛО pg_basebackup =========="
+
+# Создаем директорию
+BACKUP_PATH="$BACKUP_DIR/base_${DATE}"
+mkdir -p "$BACKUP_DIR"
+
+# Проверяем свободное место (минимум 10GB)
+AVAILABLE_GB=$(df -BG "$BACKUP_DIR" | awk 'NR==2 {print $4}' | sed 's/G//')
+if [ "$AVAILABLE_GB" -lt 10 ]; then
+    log "ERROR" "Недостаточно места. Требуется минимум 10GB"
+    exit 1
+fi
+
+log "INFO" "Доступно места: ${AVAILABLE_GB}GB"
+
+# Экспортируем пароль
+export PGPASSFILE="/opt/pg-backup/config/.pgpass"
+
+# Запускаем pg_basebackup
+log "INFO" "Запуск pg_basebackup..."
+
+if pg_basebackup \
+    -h "$DB_HOST" \
+    -p "$DB_PORT" \
+    -U "$DB_USER" \
+    -D "$BACKUP_PATH" \
+    -Ft \
+    -z \
+    -Xs \
+    -P \
+    -R \
+    -v \
+    2>> "$LOG_FILE"; then
+    
+    SIZE=$(du -sh "$BACKUP_PATH" | cut -f1)
+    
+    log "INFO" "========== pg_basebackup ЗАВЕРШЕН =========="
+    log "INFO" "Путь: $BACKUP_PATH"
+    log "INFO" "Размер: $SIZE"
+    log "INFO" "=============================================="
+    
+    # Создаем файл метаданных
+    cat > "$BACKUP_PATH/backup_info.txt" << EOF
+Backup Date: $DATE_HUMAN
+Backup Method: pg_basebackup
+WAL Level: replica
+EOF
+    
+    exit 0
+else
+    log "ERROR" "pg_basebackup завершился с ошибкой"
+    rm -rf "$BACKUP_PATH"
+    exit 1
+fi
+
+chmod +x /opt/pg-backup/scripts/pg_basebackup.sh
+bash -n /opt/pg-backup/scripts/pg_basebackup.sh
+
+# Тестируем
+./pg_basebackup.sh
+
+# Проверяем результат
+ls -lh /backup/basebackup/
