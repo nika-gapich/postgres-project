@@ -1,0 +1,87 @@
+Шаг 4.1: Создание скрипта мониторинга диска
+Что делаем: Создаем скрипт для проверки свободного места.
+cd /opt/pg-backup/scripts
+nano pg_check_disk_space.sh
+
+Вставляем код:
+#!/bin/bash
+################################################################################
+# Скрипт мониторинга свободного места
+################################################################################
+
+set -euo pipefail
+
+BACKUP_DIR="/backup"
+THRESHOLD_WARNING=80
+THRESHOLD_CRITICAL=90
+LOG_FILE="/opt/pg-backup/logs/disk_check.log"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+USAGE=$(df "$BACKUP_DIR" | awk 'NR==2 {print $5}' | sed 's/%//')
+AVAILABLE=$(df -h "$BACKUP_DIR" | awk 'NR==2 {print $4}')
+
+if [ "$USAGE" -ge "$THRESHOLD_CRITICAL" ]; then
+    log "CRITICAL: Использование диска ${USAGE}% (доступно: $AVAILABLE)"
+    exit 2
+elif [ "$USAGE" -ge "$THRESHOLD_WARNING" ]; then
+    log "WARNING: Использование диска ${USAGE}% (доступно: $AVAILABLE)"
+    exit 1
+else
+    log "OK: Использование диска ${USAGE}% (доступно: $AVAILABLE)"
+    exit 0
+fi
+
+chmod +x /opt/pg-backup/scripts/pg_check_disk_space.sh
+
+Шаг 4.2: Настройка cron задач
+Что делаем: Настраиваем автоматический запуск всех скриптов по расписанию.
+# Открываем crontab для редактирования
+crontab -e
+
+# Если спрашивает редактор - выбираем nano (цифра 1 или 2)
+Вставляем следующие строки:
+# ============================================
+# PostgreSQL Backup Cron Jobs
+# ============================================
+
+# Переменные окружения
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PGPASSFILE=/opt/pg-backup/config/.pgpass
+
+# Полный бэкап каждый день в 2:00
+0 2 * * * /opt/pg-backup/scripts/pg_backup.sh >> /opt/pg-backup/logs/pg_backup_cron.log 2>&1
+
+# Basebackup каждое воскресенье в 3:00
+0 3 * * 0 /opt/pg-backup/scripts/pg_basebackup.sh >> /opt/pg-backup/logs/pg_basebackup_cron.log 2>&1
+
+# Очистка старых бэкапов каждое воскресенье в 4:00
+0 4 * * 0 /opt/pg-backup/scripts/pg_backup_cleanup.sh >> /opt/pg-backup/logs/pg_cleanup_cron.log 2>&1
+
+# Проверка диска каждый час
+0 * * * * /opt/pg-backup/scripts/pg_check_disk_space.sh >> /opt/pg-backup/logs/disk_check_cron.log 2>&1
+
+Шаг 4.3: Тестирование cron
+Что делаем: Проверяем, что cron работает корректно.
+# Создаем тестовый скрипт
+nano /tmp/test_cron.sh
+
+#!/bin/bash
+echo "Cron test: $(date)" >> /tmp/cron_test.log
+
+chmod +x /tmp/test_cron.sh
+
+# Добавляем задачу каждую минуту
+(crontab -l 2>/dev/null; echo "* * * * * /tmp/test_cron.sh") | crontab -
+
+# Ждем 2 минуты
+sleep 120
+
+# Проверяем результат
+cat /tmp/cron_test.log
+
+# Удаляем тестовую задачу
+crontab -l | grep -v "test_cron.sh" | crontab -
