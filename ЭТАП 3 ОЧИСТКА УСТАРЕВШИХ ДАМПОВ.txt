@@ -1,0 +1,156 @@
+Шаг 3.1: Создание скрипта очистки
+Что делаем: Создаем скрипт для автоматического удаления старых бэкапов.
+cd /opt/pg-backup/scripts
+nano pg_backup_cleanup.sh
+
+#!/bin/bash
+################################################################################
+# Скрипт очистки старых backup файлов
+################################################################################
+
+set -euo pipefail
+
+# ============================================
+# КОНФИГУРАЦИЯ
+# ============================================
+BACKUP_DIR="/backup"
+LOG_FILE="/opt/pg-backup/logs/pg_cleanup.log"
+DATE_HUMAN=$(date '+%Y-%m-%d %H:%M:%S')
+
+# Периоды хранения (в днях)
+FULL_BACKUP_RETENTION=7
+BASEBACKUP_RETENTION=7
+WAL_ARCHIVE_RETENTION=14
+
+# ============================================
+# ФУНКЦИИ
+# ============================================
+
+log() {
+    local level="$1"
+    local message="$2"
+    echo "[$DATE_HUMAN] [$level] $message" | tee -a "$LOG_FILE"
+}
+
+get_dir_size() {
+    du -sh "$1" 2>/dev/null | cut -f1
+}
+
+# ============================================
+# ОЧИСТКА ПОЛНЫХ БЭКАПОВ
+# ============================================
+cleanup_full_backups() {
+    local backup_dir="$BACKUP_DIR/dumps/full"
+    
+    if [ ! -d "$backup_dir" ]; then
+        log "INFO" "Директория полных бэкапов не найдена"
+        return 0
+    fi
+    
+    log "INFO" "Очистка полных бэкапов старше $FULL_BACKUP_RETENTION дней..."
+    
+    SIZE_BEFORE=$(get_dir_size "$backup_dir")
+    FILES_TO_DELETE=$(find "$backup_dir" -name "*.sql.gz" -mtime +$FULL_BACKUP_RETENTION | wc -l)
+    
+    if [ "$FILES_TO_DELETE" -gt 0 ]; then
+        log "INFO" "Найдено файлов для удаления: $FILES_TO_DELETE"
+        
+        # Выводим список удаляемых файлов
+        find "$backup_dir" -name "*.sql.gz" -mtime +$FULL_BACKUP_RETENTION -exec ls -lh {} \; >> "$LOG_FILE"
+        
+        # Удаляем файлы
+        find "$backup_dir" -name "*.sql.gz" -mtime +$FULL_BACKUP_RETENTION -delete
+        find "$backup_dir" -name "globals_*.sql.gz" -mtime +$FULL_BACKUP_RETENTION -delete
+        
+        SIZE_AFTER=$(get_dir_size "$backup_dir")
+        log "INFO" "Полные бэкапы: $SIZE_BEFORE -> $SIZE_AFTER"
+    else
+        log "INFO" "Полные бэкапы: файлы для удаления не найдены"
+    fi
+}
+
+# ============================================
+# ОЧИСТКА BASEBACKUP
+# ============================================
+cleanup_basebackup() {
+    local backup_dir="$BACKUP_DIR/basebackup"
+    
+    if [ ! -d "$backup_dir" ]; then
+        log "INFO" "Директория basebackup не найдена"
+        return 0
+    fi
+    
+    log "INFO" "Очистка basebackup старше $BASEBACKUP_RETENTION дней..."
+    
+    SIZE_BEFORE=$(get_dir_size "$backup_dir")
+    DIRS_TO_DELETE=$(find "$backup_dir" -maxdepth 1 -type d -mtime +$BASEBACKUP_RETENTION | wc -l)
+    
+    if [ "$DIRS_TO_DELETE" -gt 1 ]; then
+        log "INFO" "Найдено директорий для удаления: $((DIRS_TO_DELETE - 1))"
+        
+        find "$backup_dir" -maxdepth 1 -type d -mtime +$BASEBACKUP_RETENTION -exec rm -rf {} \;
+        
+        SIZE_AFTER=$(get_dir_size "$backup_dir")
+        log "INFO" "Basebackup: $SIZE_BEFORE -> $SIZE_AFTER"
+    else
+        log "INFO" "Basebackup: директории для удаления не найдены"
+    fi
+}
+
+# ============================================
+# ОЧИСТКА WAL АРХИВОВ
+# ============================================
+cleanup_wal_archives() {
+    local wal_dir="$BACKUP_DIR/wal_archives"
+    
+    if [ ! -d "$wal_dir" ]; then
+        log "INFO" "Директория WAL архивов не найдена"
+        return 0
+    fi
+    
+    log "INFO" "Очистка WAL архивов старше $WAL_ARCHIVE_RETENTION дней..."
+    
+    SIZE_BEFORE=$(get_dir_size "$wal_dir")
+    FILES_TO_DELETE=$(find "$wal_dir" -type f -mtime +$WAL_ARCHIVE_RETENTION | wc -l)
+    
+    if [ "$FILES_TO_DELETE" -gt 0 ]; then
+        log "INFO" "Найдено файлов для удаления: $FILES_TO_DELETE"
+        
+        find "$wal_dir" -type f -mtime +$WAL_ARCHIVE_RETENTION -delete
+        find "$wal_dir" -type d -empty -delete 2>/dev/null || true
+        
+        SIZE_AFTER=$(get_dir_size "$wal_dir")
+        log "INFO" "WAL архивы: $SIZE_BEFORE -> $SIZE_AFTER"
+    else
+        log "INFO" "WAL архивы: файлы для удаления не найдены"
+    fi
+}
+
+# ============================================
+# ОСНОВНАЯ ЧАСТЬ
+# ============================================
+
+log "INFO" "========== НАЧАЛО ОЧИСТКИ =========="
+
+TOTAL_SIZE_BEFORE=$(get_dir_size "$BACKUP_DIR")
+log "INFO" "Общий размер до очистки: $TOTAL_SIZE_BEFORE"
+
+cleanup_full_backups
+cleanup_basebackup
+cleanup_wal_archives
+
+TOTAL_SIZE_AFTER=$(get_dir_size "$BACKUP_DIR")
+log "INFO" "Общий размер после очистки: $TOTAL_SIZE_AFTER"
+
+log "INFO" "========== ОЧИСТКА ЗАВЕРШЕНА =========="
+
+exit 0
+
+chmod +x /opt/pg-backup/scripts/pg_backup_cleanup.sh
+bash -n /opt/pg-backup/scripts/pg_backup_cleanup.sh
+
+# Тестируем
+./pg_backup_cleanup.sh
+
+# Смотрим логи
+tail -30 /opt/pg-backup/logs/pg_cleanup.log
