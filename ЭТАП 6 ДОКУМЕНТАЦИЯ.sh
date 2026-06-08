@@ -1,0 +1,93 @@
+Что делаем: Создаем подробную инструкцию по восстановлению из бэкапов.
+cd /opt/pg-backup
+nano RESTORE_PROCEDURE.md
+
+Вставляем содержимое:
+# Процедура восстановления PostgreSQL
+
+## 1. Восстановление из полного бэкапа
+
+### Шаг 1: Найти последний бэкап
+```bash
+ls -lht /backup/dumps/full/*.sql.gz | head -5
+
+Шаг 2: Проверить целостность
+gzip -t /backup/dumps/full/mydb_20240101_020000.sql.gz
+
+Шаг 3: Восстановить в новую БД
+createdb -h localhost -U postgres mydb_restored
+gunzip -c /backup/dumps/full/mydb_20240101_020000.sql.gz | psql -h localhost -U postgres -d mydb_restored
+
+2. Point-in-Time Recovery (PITR)
+Шаг 1: Остановить PostgreSQL
+docker-compose stop postgresql
+
+Шаг 2: Восстановить basebackup
+docker run --rm \
+    -v postgres_data:/var/lib/postgresql/data \
+    -v /backup/basebackup/base_20240101:/backup \
+    alpine tar xzf /backup/base.tar.gz -C /var/lib/postgresql/data
+
+Шаг 3: Создать recovery.signal
+docker run --rm -v postgres_data:/var/lib/postgresql/data alpine touch /var/lib/postgresql/data/recovery.signal
+Шаг 4: Настроить восстановление
+Добавить в postgresql.auto.conf:
+restore_command = 'cp /backup/wal_archives/%f/%p %p'
+recovery_target_time = '2024-01-01 15:30:00'
+recovery_target_action = 'promote'
+
+Шаг 5: Запустить PostgreSQL
+docker-compose start postgresql
+
+3. Проверка логов
+tail -100 /opt/pg-backup/logs/pg_backup.log
+tail -100 /opt/pg-backup/logs/wal_archive.log
+
+
+---
+
+## 🎯 ЭТАП 7: ФИНАЛЬНАЯ ПРОВЕРКА
+
+### Шаг 7.1: Проверочный чек-лист
+
+**Что делаем:** Проходим по всем пунктам и проверяем работоспособность системы.
+
+```bash
+# 1. Проверяем структуру файлов
+echo "=== Структура файлов ==="
+find /opt/pg-backup -type f -name "*.sh" | sort
+find /backup -type d | sort
+
+# 2. Проверяем права доступа
+echo "=== Права доступа ==="
+ls -la /opt/pg-backup/config/.pgpass
+ls -la /opt/pg-backup/scripts/*.sh
+
+# 3. Проверяем WAL архивацию
+echo "=== WAL Archiving ==="
+docker exec -it $CONTAINER_NAME psql -U postgres -c "SHOW archive_mode;"
+ls -la /backup/wal_archives/$(date +%Y/%m/%d)/ 2>/dev/null || echo "WAL файлы еще не созданы"
+
+# 4. Запускаем полный бэкап
+echo "=== Тестовый бэкап ==="
+/opt/pg-backup/scripts/pg_backup.sh
+
+# 5. Проверяем результат
+echo "=== Результат бэкапа ==="
+ls -lh /backup/dumps/full/
+
+# 6. Проверяем cron задачи
+echo "=== Cron задачи ==="
+crontab -l
+
+# 7. Запускаем тест восстановления
+echo "=== Тест восстановления ==="
+/opt/pg-backup/scripts/pg_restore_test.sh
+
+# 8. Проверяем все логи
+echo "=== Логи ==="
+for log in /opt/pg-backup/logs/*.log; do
+    echo "--- $log ---"
+    tail -5 "$log"
+    echo ""
+done
