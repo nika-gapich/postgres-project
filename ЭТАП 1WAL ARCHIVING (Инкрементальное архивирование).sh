@@ -1,0 +1,182 @@
+Шаг 1.1: Создание скрипта архивации WAL
+Что делаем: Создаем bash-скрипт, который будет копировать WAL-файлы в архивную директорию.
+# Переходим в директорию скриптов
+cd /opt/pg-backup/scripts
+
+# Создаем файл скрипта
+nano wal_archive.sh
+
+Вставляем следующий код:
+#!/bin/bash
+################################################################################
+# Скрипт архивации WAL-файлов PostgreSQL
+# Вызывается PostgreSQL через archive_command
+# Параметры: %p (путь к файлу) %f (имя файла)
+################################################################################
+
+set -euo pipefail
+
+# Получаем параметры от PostgreSQL
+WAL_SOURCE="$1"
+WAL_FILENAME="$2"
+
+# Конфигурация
+ARCHIVE_BASE_DIR="/backup/wal_archives"
+ARCHIVE_DIR="$ARCHIVE_BASE_DIR/$(date +%Y/%m/%d)"
+LOG_FILE="/opt/pg-backup/logs/wal_archive.log"
+
+# Функция логирования
+log_message() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+}
+
+# Создаем директорию архива если её нет
+if [ ! -d "$ARCHIVE_DIR" ]; then
+    mkdir -p "$ARCHIVE_DIR"
+    log_message "INFO" "Создана директория: $ARCHIVE_DIR"
+fi
+
+# Проверяем существование исходного файла
+if [ ! -f "$WAL_SOURCE" ]; then
+    log_message "ERROR" "Файл не найден: $WAL_SOURCE"
+    exit 1
+fi
+
+# Проверяем, не архивирован ли файл уже
+if [ -f "$ARCHIVE_DIR/$WAL_FILENAME" ]; then
+    log_message "WARN" "Файл уже существует: $WAL_FILENAME"
+    exit 0
+fi
+
+# Копируем файл
+if cp "$WAL_SOURCE" "$ARCHIVE_DIR/$WAL_FILENAME"; then
+    log_message "INFO" "Успешно архивирован: $WAL_FILENAME"
+    exit 0
+else
+    log_message "ERROR" "Ошибка архивации: $WAL_FILENAME"
+    exit 1
+fi
+
+# Сохраняем файл: Ctrl+O, Enter, Ctrl+X
+
+# Делаем скрипт исполняемым
+chmod +x /opt/pg-backup/scripts/wal_archive.sh
+
+# Создаем лог-файл
+touch /opt/pg-backup/logs/wal_archive.log
+chmod 644 /opt/pg-backup/logs/wal_archive.log
+
+# Проверяем синтаксис скрипта
+bash -n /opt/pg-backup/scripts/wal_archive.sh
+# Если нет вывода - синтаксис корректен
+
+Шаг 1.2: Настройка PostgreSQL для WAL archiving
+Что делаем: Модифицируем конфигурацию PostgreSQL для включения архивации WAL.
+
+# Подключаемся к PostgreSQL
+docker exec -it $CONTAINER_NAME psql -U postgres
+
+# Проверяем текущие настройки
+SHOW wal_level;
+SHOW archive_mode;
+SHOW archive_command;
+
+# Выходим из psql
+\q
+
+# Создаем конфигурационный файл для кастомных настроек
+cd /opt/pg-backup/config
+nano postgresql_custom.conf
+
+Вставляем содержимое:
+# ============================================
+# WAL Archiving Configuration
+# ============================================
+
+# Уровень WAL (replica необходим для архивации)
+wal_level = replica
+
+# Включение режима архивации
+archive_mode = on
+
+# Команда архивации (вызывает наш скрипт)
+archive_command = '/opt/pg-backup/scripts/wal_archive.sh %p %f'
+
+# Таймаут архивации (секунды)
+archive_timeout = 300
+
+# Максимальное количество WAL отправителей
+max_wal_senders = 3
+
+# Размер хранимых WAL
+wal_keep_size = 1GB
+
+# Сохраняем файл: Ctrl+O, Enter, Ctrl+X
+
+# Копируем конфигурацию в контейнер PostgreSQL
+docker cp /opt/pg-backup/config/postgresql_custom.conf $CONTAINER_NAME:/etc/postgresql/postgresql.conf.d/custom.conf
+
+# Перезапускаем контейнер для применения настроек
+docker restart $CONTAINER_NAME
+
+# Ждем запуска
+sleep 15
+
+# Проверяем, что контейнер запущен
+docker ps | grep $CONTAINER_NAME
+
+# Проверяем примененные настройки
+docker exec -it $CONTAINER_NAME psql -U postgres -c "SHOW wal_level;"
+docker exec -it $CONTAINER_NAME psql -U postgres -c "SHOW archive_mode;"
+docker exec -it $CONTAINER_NAME psql -U postgres -c "SHOW archive_command;"
+
+Ожидаемый результат:
+wal_level = replica
+archive_mode = on
+archive_command = путь к нашему скрипту
+
+Шаг 1.3: Тестирование WAL архивации
+Что делаем: Генерируем WAL-файлы и проверяем, что они архивируются.
+
+# Подключаемся к PostgreSQL и создаем тестовые данные
+docker exec -it $CONTAINER_NAME psql -U postgres -d mydb << 'EOF'
+
+-- Создаем тестовую таблицу
+CREATE TABLE IF NOT EXISTS wal_test (
+    id SERIAL PRIMARY KEY,
+    data TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Вставляем данные для генерации WAL
+INSERT INTO wal_test (data)
+SELECT md5(random()::text) 
+FROM generate_series(1, 10000);
+
+-- Принудительно переключаем WAL сегмент
+SELECT pg_switch_wal();
+
+-- Проверяем количество записей
+SELECT COUNT(*) FROM wal_test;
+
+EOF
+
+# Ждем несколько секунд для архивации
+sleep 10
+
+# Проверяем архивную директорию
+ls -la /backup/wal_archives/$(date +%Y/%m/%d)/
+
+# Смотрим логи архивации
+tail -20 /opt/pg-backup/logs/wal_archive.log
+
+# Проверяем статус архиватора через SQL
+docker exec -it $CONTAINER_NAME psql -U postgres -c "SELECT * FROM pg_stat_archiver;"
+
+Что проверяем:
+Файлы появились в /backup/wal_archives/
+В логах есть записи об успешной архивации
+archived_count в pg_stat_archiver увеличился
